@@ -1,11 +1,19 @@
 using LogiTrack;
 using LogiTrack.Models;
+using LogiTrack.Middleware;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
+builder.Services.AddControllers();
+builder.Services.AddDbContext<LogiTrackContext>(options =>
+    options.UseSqlite("Data Source=logitrack.db"));
+
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
@@ -13,13 +21,29 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.UseSwagger();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "LogiTrack API V1");
+        c.RoutePrefix = "swagger";
+    });
 }
 
 app.UseHttpsRedirection();
 
-// Test the database and models
-using (var context = new LogiTrackContext())
+// Add custom error handling middleware
+app.UseMiddleware<ErrorHandlingMiddleware>();
+
+app.MapControllers();
+
+// Seed database on startup
+using (var scope = app.Services.CreateScope())
 {
+    var context = scope.ServiceProvider.GetRequiredService<LogiTrackContext>();
+    
+    // Ensure database is created
+    context.Database.EnsureCreated();
+    
     // Add test inventory items if none exist
     if (!context.InventoryItems.Any())
     {
@@ -32,75 +56,10 @@ using (var context = new LogiTrackContext())
 
         context.InventoryItems.AddRange(items);
         context.SaveChanges();
-    }
-
-    // Retrieve and print inventory to confirm
-    var allItems = context.InventoryItems.ToList();
-    Console.WriteLine("Current Inventory:");
-    foreach (var item in allItems)
-    {
-        item.DisplayInfo();
-    }
-
-    // Test Order functionality with proper EF Core relationships
-    var order = new Order
-    {
-        CustomerName = "Samir",
-        DatePlaced = new DateTime(2025, 4, 5)
-    };
-
-    // Add the order to context first to get an OrderId
-    context.Orders.Add(order);
-    context.SaveChanges();
-
-    // Add items to the order using the improved AddItem method
-    var palletJack = allItems.FirstOrDefault(i => i.Name == "Pallet Jack");
-    var forklift = allItems.FirstOrDefault(i => i.Name == "Forklift");
-
-    if (palletJack != null)
-        order.AddItem(palletJack, 2); // Order 2 pallet jacks
-
-    if (forklift != null)
-        order.AddItem(forklift, 1); // Order 1 forklift
-
-    // Save the order items
-    context.SaveChanges();
-
-    // Print enhanced order summary
-    Console.WriteLine("\nOrder Summary:");
-    order.PrintOrderDetails();
-    Console.WriteLine($"Total Quantity: {order.GetTotalQuantity()}");
-
-    // Test removing an item
-    if (forklift != null)
-    {
-        order.RemoveItem(forklift.ItemId);
-        context.SaveChanges();
         
-        Console.WriteLine("\nAfter removing forklift:");
-        order.PrintOrderDetails();
-        Console.WriteLine($"Total Quantity: {order.GetTotalQuantity()}");
+        Console.WriteLine("Database seeded with initial inventory items.");
     }
 }
-
-var summaries = new[]
-{
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast");
 
 app.Run();
 
