@@ -1,9 +1,10 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using LogiTrack.Models;
 
 namespace LogiTrack
 {
-    public class LogiTrackContext : DbContext
+    public class LogiTrackContext : IdentityDbContext<ApplicationUser>
     {
         public LogiTrackContext(DbContextOptions<LogiTrackContext> options) : base(options) { }
 
@@ -13,6 +14,8 @@ namespace LogiTrack
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            base.OnModelCreating(modelBuilder); // Important for Identity tables
+
             // Configure the one-to-many relationship between Order and OrderItem
             modelBuilder.Entity<OrderItem>()
                 .HasOne(oi => oi.Order)
