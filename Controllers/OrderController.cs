@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.Caching.Memory;
+using System.Diagnostics;
 using LogiTrack.Models;
 using LogiTrack.DTOs;
 
@@ -12,22 +14,54 @@ namespace LogiTrack.Controllers
     public class OrderController : ControllerBase
     {
         private readonly LogiTrackContext _context;
+        private readonly IMemoryCache _cache;
 
-        public OrderController(LogiTrackContext context)
+        public OrderController(LogiTrackContext context, IMemoryCache cache)
         {
             _context = context;
+            _cache = cache;
         }
 
         // GET: api/order
         [HttpGet]
         public async Task<ActionResult<IEnumerable<OrderResponseDto>>> GetOrders()
         {
+            const string cacheKey = "all_orders";
+            var stopwatch = Stopwatch.StartNew();
+
+            // Try to get orders from cache first
+            if (_cache.TryGetValue(cacheKey, out List<OrderResponseDto>? cachedOrders))
+            {
+                stopwatch.Stop();
+                Response.Headers["X-Cache-Status"] = "HIT";
+                Response.Headers["X-Response-Time"] = $"{stopwatch.ElapsedMilliseconds}ms";
+                return Ok(cachedOrders);
+            }
+
+            // Optimized query with eager loading and no tracking for read-only scenarios
             var orders = await _context.Orders
+                .AsNoTracking() // No tracking for read-only operations
                 .Include(o => o.OrderItems)
                 .ThenInclude(oi => oi.InventoryItem)
+                .OrderByDescending(o => o.DatePlaced) // Add ordering for consistency
                 .ToListAsync();
 
             var orderDtos = orders.Select(order => MapToOrderResponseDto(order)).ToList();
+
+            // Cache the result for 2 minutes
+            var cacheOptions = new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2),
+                SlidingExpiration = TimeSpan.FromMinutes(1),
+                Priority = CacheItemPriority.Normal
+            };
+
+            _cache.Set(cacheKey, orderDtos, cacheOptions);
+
+            stopwatch.Stop();
+            Response.Headers["X-Cache-Status"] = "MISS";
+            Response.Headers["X-Response-Time"] = $"{stopwatch.ElapsedMilliseconds}ms";
+
             return Ok(orderDtos);
         }
 
@@ -35,7 +69,21 @@ namespace LogiTrack.Controllers
         [HttpGet("{id}")]
         public async Task<ActionResult<OrderResponseDto>> GetOrder(int id)
         {
+            var cacheKey = $"order_{id}";
+            var stopwatch = Stopwatch.StartNew();
+
+            // Try to get order from cache first
+            if (_cache.TryGetValue(cacheKey, out OrderResponseDto? cachedOrder))
+            {
+                stopwatch.Stop();
+                Response.Headers["X-Cache-Status"] = "HIT";
+                Response.Headers["X-Response-Time"] = $"{stopwatch.ElapsedMilliseconds}ms";
+                return Ok(cachedOrder);
+            }
+
+            // Optimized query with eager loading and no tracking
             var order = await _context.Orders
+                .AsNoTracking() // No tracking for read-only operations
                 .Include(o => o.OrderItems)
                 .ThenInclude(oi => oi.InventoryItem)
                 .FirstOrDefaultAsync(o => o.OrderId == id);
@@ -46,6 +94,21 @@ namespace LogiTrack.Controllers
             }
 
             var orderDto = MapToOrderResponseDto(order);
+
+            // Cache individual orders for 5 minutes
+            var cacheOptions = new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5),
+                SlidingExpiration = TimeSpan.FromMinutes(2),
+                Priority = CacheItemPriority.Normal
+            };
+
+            _cache.Set(cacheKey, orderDto, cacheOptions);
+
+            stopwatch.Stop();
+            Response.Headers["X-Cache-Status"] = "MISS";
+            Response.Headers["X-Response-Time"] = $"{stopwatch.ElapsedMilliseconds}ms";
+
             return Ok(orderDto);
         }
 
@@ -100,6 +163,9 @@ namespace LogiTrack.Controllers
 
             var responseDto = MapToOrderResponseDto(createdOrder);
 
+            // Invalidate caches after creation
+            InvalidateOrderCaches();
+
             return CreatedAtAction(
                 nameof(GetOrder), 
                 new { id = createdOrder.OrderId }, 
@@ -124,6 +190,10 @@ namespace LogiTrack.Controllers
             _context.Orders.Remove(order);
             
             await _context.SaveChangesAsync();
+            
+            // Invalidate caches after deletion
+            InvalidateOrderCaches(id);
+            
             return NoContent();
         }
 
@@ -176,6 +246,10 @@ namespace LogiTrack.Controllers
             }
 
             await _context.SaveChangesAsync();
+            
+            // Invalidate caches after update
+            InvalidateOrderCaches(id);
+            
             return NoContent();
         }
 
@@ -187,13 +261,17 @@ namespace LogiTrack.Controllers
             }
 
             var inventoryItemIds = items.Select(i => i.InventoryItemId).ToList();
+            
+            // Optimized query with AsNoTracking for read-only validation
             var existingItems = await _context.InventoryItems
+                .AsNoTracking()
                 .Where(item => inventoryItemIds.Contains(item.ItemId))
+                .Select(item => item.ItemId) // Only select what we need
                 .ToListAsync();
 
             if (existingItems.Count != inventoryItemIds.Count)
             {
-                var missingIds = inventoryItemIds.Except(existingItems.Select(i => i.ItemId));
+                var missingIds = inventoryItemIds.Except(existingItems);
                 throw new ArgumentException($"The following inventory item IDs were not found: {string.Join(", ", missingIds)}");
             }
 
@@ -202,6 +280,18 @@ namespace LogiTrack.Controllers
             if (invalidItems.Any())
             {
                 throw new ArgumentException("All item quantities must be greater than zero");
+            }
+        }
+
+        /// <summary>
+        /// Invalidates order caches when data is modified
+        /// </summary>
+        private void InvalidateOrderCaches(int? orderId = null)
+        {
+            _cache.Remove("all_orders");
+            if (orderId.HasValue)
+            {
+                _cache.Remove($"order_{orderId.Value}");
             }
         }
 

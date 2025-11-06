@@ -15,6 +15,9 @@ builder.Services.AddControllers();
 builder.Services.AddDbContext<LogiTrackContext>(options =>
     options.UseSqlite("Data Source=logitrack.db"));
 
+// Add Memory Caching
+builder.Services.AddMemoryCache();
+
 // Configure Identity
 builder.Services.AddIdentity<ApplicationUser, IdentityRole>(options =>
 {
